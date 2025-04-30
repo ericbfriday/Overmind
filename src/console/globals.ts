@@ -4,6 +4,7 @@ global.__VERSION__ = '0.5.2';
 declare function deref(ref: string): RoomObject | null;
 
 global.deref = function(ref: string): RoomObject | null { // dereference any object from identifier
+	// @ts-ignore
 	return Game.getObjectById(ref) || Game.flags[ref] || Game.creeps[ref] || Game.spawns[ref] || null;
 };
 
@@ -12,6 +13,10 @@ declare function derefRoomPosition(protoPos: ProtoPos): RoomPosition;
 global.derefRoomPosition = function(protoPos: ProtoPos): RoomPosition {
 	return new RoomPosition(protoPos.x, protoPos.y, protoPos.roomName);
 };
+
+global.NO_ACTION = 1;
+
+global.PERMACACHE = {};
 
 // // Assign values to the memory key aliases declared in memory.d.ts
 // global._TICK = 'T';
@@ -37,7 +42,7 @@ global.derefRoomPosition = function(protoPos: ProtoPos): RoomPosition {
 // global._RM_INVASIONDATA = 'v';
 // global._RM_HARVEST = 'h';
 // global._RM_CASUALTIES = 'd';
-// global._RM_SAFETY = 'f';
+// global.RMEM_SAFETY = 'f';
 // global._RM_PREVPOSITIONS = 'p';
 // global._RM_CREEPSINROOM = 'cr';
 //

@@ -7,9 +7,8 @@ export type transferAllTargetType = StructureStorage | StructureTerminal | Struc
 export const transferAllTaskName = 'transferAll';
 
 @profile
-export class TaskTransferAll extends Task {
+export class TaskTransferAll extends Task<transferAllTargetType> {
 
-	target: transferAllTargetType;
 	data: {
 		skipEnergy?: boolean;
 	};
@@ -17,15 +16,15 @@ export class TaskTransferAll extends Task {
 	constructor(target: transferAllTargetType, skipEnergy = false, options = {} as TaskOptions) {
 		super(transferAllTaskName, target, options);
 		this.data.skipEnergy = skipEnergy;
+		this.settings.blind = false;
 	}
 
 	isValidTask() {
-		for (const resourceType in this.creep.carry) {
+		for (const [resourceType, amount] of this.creep.carry.contents) {
 			if (this.data.skipEnergy && resourceType == RESOURCE_ENERGY) {
 				continue;
 			}
-			const amountInCarry = this.creep.carry[<ResourceConstant>resourceType] || 0;
-			if (amountInCarry > 0) {
+			if (amount > 0) {
 				return true;
 			}
 		}
@@ -33,17 +32,17 @@ export class TaskTransferAll extends Task {
 	}
 
 	isValidTarget() {
-		return _.sum(this.target.store) < this.target.storeCapacity;
+		return !!this.target && _.sum(this.target.store) < this.target.store.getCapacity();
 	}
 
 	work() {
-		for (const resourceType in this.creep.carry) {
+		if (!this.target) return ERR_INVALID_TARGET;
+		for (const [resourceType, amount] of this.creep.carry.contents) {
 			if (this.data.skipEnergy && resourceType == RESOURCE_ENERGY) {
 				continue;
 			}
-			const amountInCarry = this.creep.carry[<ResourceConstant>resourceType] || 0;
-			if (amountInCarry > 0) {
-				return this.creep.transfer(this.target, <ResourceConstant>resourceType);
+			if (amount > 0) {
+				return this.creep.transfer(this.target, resourceType);
 			}
 		}
 		return -1;

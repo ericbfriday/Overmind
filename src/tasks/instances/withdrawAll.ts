@@ -1,20 +1,20 @@
 /* Withdraw a resource from a target */
 
-import {StoreStructure} from '../../declarations/typeGuards';
 import {profile} from '../../profiler/decorator';
 import {Task} from '../Task';
+import {withdrawTargetType} from './withdraw';
 
-export type withdrawAllTargetType = StoreStructure | Tombstone;
+export type withdrawAllTargetType = AnyStoreStructure;
 
 export const withdrawAllTaskName = 'withdrawAll';
 
 @profile
-export class TaskWithdrawAll extends Task {
+export class TaskWithdrawAll extends Task<withdrawTargetType> {
 
-	target: withdrawAllTargetType;
 
 	constructor(target: withdrawAllTargetType, options = {} as TaskOptions) {
 		super(withdrawAllTaskName, target, options);
+		this.settings.blind = true;
 	}
 
 	isValidTask() {
@@ -22,15 +22,23 @@ export class TaskWithdrawAll extends Task {
 	}
 
 	isValidTarget() {
-		return _.sum(this.target.store) > 0;
+		return !!this.target && _.sum(this.target.store) > 0;
 	}
 
 	work() {
-		for (const resourceType in this.target.store) {
-			const amountInStore = this.target.store[<ResourceConstant>resourceType] || 0;
+		if (!this.target) return ERR_INVALID_TARGET;
+		let resourceTransferType;
+		for (const [resourceType, amountInStore] of this.target.store.contents) {
 			if (amountInStore > 0) {
-				return this.creep.withdraw(this.target, <ResourceConstant>resourceType);
+				resourceTransferType = resourceType;
+				// Prioritize non-energy
+				if (resourceType != RESOURCE_ENERGY) {
+					break;
+				}
 			}
+		}
+		if (!!resourceTransferType) {
+			return this.creep.withdraw(this.target, <ResourceConstant>resourceTransferType);
 		}
 		return -1;
 	}

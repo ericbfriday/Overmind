@@ -41,11 +41,7 @@ export class PioneerOverlord extends Overlord {
 													_.filter(pioneer.room.structures, s => !s.isWalkable));
 		if (blockingPos) {
 			const structure = blockingPos.lookFor(LOOK_STRUCTURES)[0];
-			if (structure) {
-				return structure;
-			} else {
-				log.error(`${this.print}: no structure at blocking pos ${blockingPos.print}! (Why?)`);
-			}
+			return structure || log.error(`${this.print}: no structure at blocking pos ${blockingPos.print}!`);
 		}
 	}
 
@@ -63,9 +59,10 @@ export class PioneerOverlord extends Overlord {
 			// Build and recharge
 			if (pioneer.carry.energy == 0) {
 				pioneer.task = Tasks.recharge();
-			} else if (this.room && this.room.controller &&
-					   (this.room.controller.ticksToDowngrade < 2500 || !this.spawnSite) &&
-					   !(this.room.controller.upgradeBlocked > 0)) {
+			} else if (this.room && this.room.controller && (this.room.controller.ticksToDowngrade <
+															 (0.1 * CONTROLLER_DOWNGRADE[this.room.controller.level])
+															 || !this.spawnSite)
+					   && !(this.room.controller.upgradeBlocked > 0)) {
 				// Save controller if it's about to downgrade or if you have nothing else to do
 				pioneer.task = Tasks.upgrade(this.room.controller);
 			} else if (this.spawnSite) {
@@ -73,7 +70,7 @@ export class PioneerOverlord extends Overlord {
 			}
 		} else {
 			// pioneer.task = Tasks.goTo(this.pos);
-			pioneer.goTo(this.pos, {ensurePath: true, avoidSK: true, waypoints: this.directive.waypoints});
+			pioneer.goTo(this.pos, {pathOpts: {ensurePath: true, avoidSK: true}});
 		}
 	}
 

@@ -1,14 +1,15 @@
-import {Colony, getAllColonies} from '../Colony';
+import {Colony, ColonyStage, getAllColonies} from '../Colony';
 import {log} from '../console/log';
-import {isOwnedStructure} from '../declarations/typeGuards';
+import {isOwnedStructure, isRampart, isSpawn, isStorage, isTerminal, isWall} from '../declarations/typeGuards';
 import {DirectiveTerminalRebuildState} from '../directives/terminalState/terminalState_rebuild';
+import {RoomIntel} from '../intel/RoomIntel';
 import {Energetics} from '../logistics/Energetics';
 import {Autonomy, getAutonomyLevel, Mem} from '../memory/Memory';
 import {Pathing} from '../movement/Pathing';
 import {BuildPriorities, DemolishStructurePriorities} from '../priorities/priorities_structures';
 import {profile} from '../profiler/decorator';
 import {bullet} from '../utilities/stringConstants';
-import {derefCoords, maxBy, onPublicServer} from '../utilities/utils';
+import {hasMinerals, maxBy, onPublicServer} from '../utilities/utils';
 import {Visualizer} from '../visuals/Visualizer';
 import {MY_USERNAME} from '../~settings';
 import {BarrierPlanner} from './BarrierPlanner';
@@ -18,9 +19,9 @@ import {hatcheryLayout} from './layouts/hatchery';
 import {RoadPlanner} from './RoadPlanner';
 
 export interface BuildingPlannerOutput {
-	name: string;
-	shard: string;
-	rcl: string;
+	name?: string;
+	shard?: string;
+	rcl?: string | number;
 	buildings: { [structureType: string]: { pos: Coord[] } };
 }
 
@@ -30,7 +31,7 @@ export interface StructureLayout {
 	data: {
 		anchor: Coord;
 		pointsOfInterest?: {
-			[pointLabel: string]: Coord;
+			[pointLabel: string]: Coord | Coord[];
 		}
 	};
 }
@@ -47,8 +48,9 @@ export interface RoomPlan {
 	};
 }
 
-export interface PlannerMemory {
+export interface RoomPlannerMemory {
 	active: boolean;
+	misplacedStructures?: boolean;
 	relocating?: boolean;
 	recheckStructuresAt?: number;
 	bunkerData?: {
@@ -59,10 +61,10 @@ export interface PlannerMemory {
 	savedFlags: { secondaryColor: ColorConstant, pos: ProtoPos, memory: FlagMemory }[];
 }
 
-const memoryDefaults: PlannerMemory = {
+const getDefaultRoomPlannerMemory: () => RoomPlannerMemory = () => ({
 	active    : true,
 	savedFlags: [],
-};
+});
 
 
 export function getAllStructureCoordsFromLayout(layout: StructureLayout, rcl: number): Coord[] {
@@ -94,7 +96,7 @@ export function translatePositions(positions: RoomPosition[], fromAnchor: Coord,
 @profile
 export class RoomPlanner {
 	colony: Colony;							// The colony this is for
-	memory: PlannerMemory;
+	memory: RoomPlannerMemory;
 	map: StructureMap;						// Flattened {structureType: RoomPositions[]} for final structure placements
 	placements: { 							// Used for generating the plan
 		hatchery: RoomPosition | undefined;
@@ -107,7 +109,7 @@ export class RoomPlanner {
 
 	static settings = {
 		recheckAfter      : 50,
-		siteCheckFrequency: onPublicServer() ? 300 : 100,	// how often to recheck for structures; doubled at RCL8
+		siteCheckFrequency: onPublicServer() ? 50 : 20,	// how often to recheck for structures; multiplied by RCL
 		linkCheckFrequency: 100,
 		maxSitesPerColony : onPublicServer() ? 10 : 25,
 		maxDismantleCount : 5,
@@ -115,14 +117,14 @@ export class RoomPlanner {
 
 	constructor(colony: Colony) {
 		this.colony = colony;
-		this.memory = Mem.wrap(this.colony.memory, 'roomPlanner', memoryDefaults);
+		this.memory = Mem.wrap(this.colony.memory, 'roomPlanner', getDefaultRoomPlannerMemory);
 		this.barrierPlanner = new BarrierPlanner(this);
 		this.roadPlanner = new RoadPlanner(this);
 		this.refresh();
 	}
 
 	refresh(): void {
-		this.memory = Mem.wrap(this.colony.memory, 'roomPlanner', memoryDefaults);
+		this.memory = Mem.wrap(this.colony.memory, 'roomPlanner', getDefaultRoomPlannerMemory);
 		this.placements = {
 			hatchery     : undefined,
 			commandCenter: undefined,
@@ -342,7 +344,7 @@ export class RoomPlanner {
 		}
 	}
 
-	// TODO: component rotation isn't currently fully supported
+	// No-fixTODO: component rotation isn't currently fully supported
 	/* Rotates component positions about a pivot point counterclockwise by the given angle; done in-place */
 	private rotateComponent(map: StructureMap, pivot: RoomPosition | Coord, angle: number): void {
 		let R = ([x, y]: number[]) => ([x, y]);
@@ -394,6 +396,9 @@ export class RoomPlanner {
 	 */
 	getObstacles(): RoomPosition[] {
 		let obstacles: RoomPosition[] = [];
+		// Add sources and extractors to impassibles for tunnels
+		obstacles.concat(_.map(this.colony.sources, source => source.pos));
+		obstacles.concat(_.map(this.colony.extractors, extr => extr.pos));
 		const passableStructureTypes: string[] = [STRUCTURE_ROAD, STRUCTURE_CONTAINER, STRUCTURE_RAMPART];
 		if (_.keys(this.map).length > 0) { // if room planner has made the map, use that
 			for (const structureType in this.map) {
@@ -499,17 +504,14 @@ export class RoomPlanner {
 		}
 	}
 
-	/* Whether a constructionSite should be placed at a position */
+	/**
+	 * Whether a constructionSite should be placed at a position
+	 */
 	static canBuild(structureType: BuildableStructureConstant, pos: RoomPosition): boolean {
 		if (!pos.room) return false;
-		const buildings = _.filter(pos.lookFor(LOOK_STRUCTURES), s => s && s.structureType == structureType);
-		const sites = pos.lookFor(LOOK_CONSTRUCTION_SITES);
-		if (!buildings || buildings.length == 0) {
-			if (!sites || sites.length == 0) {
-				return true;
-			}
-		}
-		return false;
+		const structure = pos.lookForStructure(structureType);
+		const constructionSite = pos.lookFor(LOOK_CONSTRUCTION_SITES)[0];
+		return !structure && !constructionSite;
 	}
 
 	/**
@@ -579,7 +581,8 @@ export class RoomPlanner {
 		if (getAllColonies().length <= 1 && !this.colony.storage) {
 			return; // Not safe to move structures until you have multiple colonies or a storage
 		}
-		// Start terminal evacuation if it needs to be moved
+
+		// Create a terminal rebuilding directive if terminal needs to be relocated
 		if (this.colony.terminal) {
 			if (this.colony.storage && !this.structureShouldBeHere(STRUCTURE_STORAGE, this.colony.storage.pos)
 				|| !this.structureShouldBeHere(STRUCTURE_TERMINAL, this.colony.terminal.pos)) {
@@ -592,7 +595,7 @@ export class RoomPlanner {
 
 		// Recall the appropriate map
 		this.recallMap();
-		if (!this.map || this.map == {}) { // in case a map hasn't been generated yet
+		if (!this.map || _.isEmpty(this.map)) { // in case a map hasn't been generated yet
 			log.info(this.colony.name + ' does not have a room plan yet! Unable to demolish errant structures.');
 		}
 
@@ -601,8 +604,9 @@ export class RoomPlanner {
 			this.colony.room.extractor.destroy();
 		}
 
-		// Build missing structures from room plan
+		// Demolish any structures that are misplaced
 		this.memory.relocating = false;
+		this.memory.misplacedStructures = false;
 		for (const priority of DemolishStructurePriorities) {
 			const structureType = priority.structureType;
 
@@ -618,43 +622,43 @@ export class RoomPlanner {
 			let structures: Structure[] = _.filter(this.colony.room.find(FIND_STRUCTURES),
 												   s => s.structureType == structureType);
 			if (structureType == STRUCTURE_WALL) {
-				structures = _.filter(structures, wall => wall.hits != undefined); // can't destroy newbie walls
+				// Novice zone walls have hits undefined, so filter them out
+				structures = _.filter(structures, wall => wall.hits != undefined);
 			}
 
 			// Loop through all structures and conditionally remove ones which are misplaced
 			for (const structure of structures) {
 
-				if (!this.structureShouldBeHere(structureType, structure.pos) ||
-					(isOwnedStructure(structure) && !structure.my)) {
+				if (!this.structureShouldBeHere(structureType, structure.pos) || (isOwnedStructure(structure) && !structure.my)) {
 
 					// Don't demolish your own ramparts, just let them decay
-					if (skipRamparts && !destroyAllStructureTypes && structure.structureType == STRUCTURE_RAMPART
-						&& (<StructureRampart>structure).my) {
+					if (skipRamparts && !destroyAllStructureTypes && isRampart(structure) && structure.my) {
 						continue;
 					}
 
 					// remove misplaced structures or hostile owned structures, with exceptions below
-					if (this.colony.level < 4
-						&& (structureType == STRUCTURE_STORAGE || structureType == STRUCTURE_TERMINAL)) {
+					this.memory.misplacedStructures = true;
+
+					if (this.colony.level < 4 && (isStorage(structure) || isTerminal(structure))) {
 						break; // don't destroy terminal or storage when under RCL4 - can use energy inside
 					}
-					if (structureType != STRUCTURE_WALL && structureType != STRUCTURE_RAMPART) {
+					if (this.colony.level < 6 && isTerminal(structure) && hasMinerals(structure.store)) {
+						break; // don't destroy terminal when under RCL6 if there are resources available.
+					}
+					if (!isWall(structure) && !isRampart(structure)) {
 						this.memory.relocating = true;
 					}
 
 					// Don't remove the terminal until you have rebuilt storage
-					if (this.colony.level >= 6 && structureType == STRUCTURE_TERMINAL) {
+					if (this.colony.level >= 6 && isTerminal(structure)) {
 						if (!this.colony.storage) {
 							log.info(`${this.colony.name}: waiting until storage is built to remove terminal`);
 							return;
-						} else if (this.colony.terminal &&
-								   _.sum(this.colony.terminal.store) - this.colony.terminal.energy > 1000) {
+						} else if (this.colony.terminal && _.sum(this.colony.terminal.store) - this.colony.terminal.energy > 1000) {
 							log.info(`${this.colony.name}: waiting on resources to evacuate before removing terminal`);
 							return;
-						} else if (this.colony.storage &&
-								   this.structureShouldBeHere(STRUCTURE_STORAGE, this.colony.storage.pos) &&
-								   this.colony.storage.energy
-								   < Energetics.settings.storage.energy.destroyTerminalThreshold) {
+						} else if (this.colony.storage && this.structureShouldBeHere(STRUCTURE_STORAGE, this.colony.storage.pos) &&
+								   this.colony.storage.energy < Energetics.settings.storage.energy.destroyTerminalThreshold) {
 							log.info(`${this.colony.name}: waiting to move energy to storage before removing terminal`);
 							return;
 						}
@@ -664,11 +668,10 @@ export class RoomPlanner {
 					const amountMissing = CONTROLLER_STRUCTURES[structureType][this.colony.level] - structures.length
 										  + removeCount;
 					if (amountMissing < maxRemoved) {
-						if (structureType == STRUCTURE_SPAWN && this.colony.spawns.length == 1) {
+						if (isSpawn(structure) && this.colony.spawns.length == 1) {
 							const spawnCost = 15000;
 							if (this.colony.assets[RESOURCE_ENERGY] < spawnCost) {
-								log.warning(`${this.colony.print}: Unsafe to destroy misplaced spawn: ` +
-											`${this.colony.assets[RESOURCE_ENERGY]}/${spawnCost} energy available`);
+								log.warning(`${this.colony.print}: Unsafe to destroy misplaced spawn: ${this.colony.assets[RESOURCE_ENERGY]}/${spawnCost} energy available`);
 								if (!destroyAllStructureTypes) {
 									return;
 								}
@@ -684,7 +687,8 @@ export class RoomPlanner {
 								}
 							}
 						}
-						const result = structure.destroy();
+						// TODO: adding this for safety for now; remove later
+						const result: any = 'destroy() disabled'; // structure.destroy();
 						if (result != OK) {
 							log.warning(`${this.colony.name}: couldn't destroy structure of type ` +
 										`"${structureType}" at ${structure.pos.print}. Result: ${result}`);
@@ -709,47 +713,48 @@ export class RoomPlanner {
 	 */
 	private buildMissingStructures(): void {
 		// Max buildings that can be placed each tick
-		let count = RoomPlanner.settings.maxSitesPerColony - this.colony.constructionSites.length;
+		let remainingSites = RoomPlanner.settings.maxSitesPerColony - this.colony.constructionSites.length;
 		// Recall the appropriate map
 		this.recallMap();
-		if (!this.map || this.map == {}) { // in case a map hasn't been generated yet
+		if (!this.map || _.isEmpty(this.map)) { // in case a map hasn't been generated yet
 			log.info(this.colony.name + ' does not have a room plan yet! Unable to build missing structures.');
 		}
 		// Build missing structures from room plan
 		for (const structureType of BuildPriorities) {
-			if (this.map[structureType]) {
-				for (const pos of this.map[structureType]) {
-					if (count > 0 && RoomPlanner.canBuild(structureType, pos)) {
-						const result = pos.createConstructionSite(structureType);
-						if (result != OK) {
-							const structures = pos.lookFor(LOOK_STRUCTURES);
-							for (const structure of structures) {
-								// let thisImportance = _.findIndex(BuildPriorities, type => type == structureType);
-								// let existingImportance = _.findIndex(BuildPriorities,
-								// 									 type => type == structure.structureType);
-								const safeTypes: string[] = [STRUCTURE_STORAGE, STRUCTURE_TERMINAL, STRUCTURE_SPAWN];
-								// Destroy the structure if it is less important and not protected
-								if (!this.structureShouldBeHere(structure.structureType, pos)
-									&& !safeTypes.includes(structure.structureType)) {
-									const result = structure.destroy();
-									log.info(`${this.colony.name}: destroyed ${structure.structureType} at` +
-											 ` ${structure.pos.print}`);
-									if (result == OK) {
-										this.memory.recheckStructuresAt = Game.time +
-																		  RoomPlanner.settings.recheckAfter;
-									}
-								}
-							}
-							log.warning(`${this.colony.name}: couldn't create construction site of type ` +
-										`"${structureType}" at ${pos.print}. Result: ${result}`);
-						} else {
-							count--;
+			if (!this.map[structureType]) continue;
+			for (const pos of this.map[structureType]) {
+
+				if (RoomPlanner.canBuild(structureType, pos) && remainingSites > 0) {
+
+					// Don't build defensive structures while the room is in safe mode if you are at low RCL
+					if (structureType == STRUCTURE_TOWER || structureType == STRUCTURE_RAMPART || structureType == STRUCTURE_WALL) {
+						if (this.colony.stage == ColonyStage.Larva && (this.colony.controller.safeMode || 0) > 2500) {
+							continue;
+						}
+					}
+
+					// Otherwise create the construction site
+					const result = pos.createConstructionSite(structureType);
+					if (result == OK) {
+						remainingSites--;
+						this.memory.recheckStructuresAt = Game.time + RoomPlanner.settings.recheckAfter;
+					}
+
+					// If we've run into a problem then we might need to remove something
+					else {
+						log.warning(`${this.colony.print}: couldn't create site of type "${structureType}" at ${pos.print}. Result: ${result}`);
+						const destroyResult = this.destroyStructurePreventingBuildingAtPos(pos);
+						if (destroyResult == OK) {
+							log.info(`${this.colony.print}: destroyed ${structureType} at ${pos.print}`);
 							this.memory.recheckStructuresAt = Game.time + RoomPlanner.settings.recheckAfter;
+						} else {
+							log.warning(`${this.colony.print}: couldn't destroy ${structureType} at ${pos.print}! Result: ${destroyResult}`);
 						}
 					}
 				}
 			}
 		}
+
 		// Build extractor on mineral deposit if not already present
 		const mineral = this.colony.room.find(FIND_MINERALS)[0];
 		if (mineral) {
@@ -758,6 +763,24 @@ export class RoomPlanner {
 				mineral.pos.createConstructionSite(STRUCTURE_EXTRACTOR);
 			}
 		}
+	}
+
+	private destroyStructurePreventingBuildingAtPos(pos: RoomPosition): number | string {
+		const structures = pos.lookFor(LOOK_STRUCTURES);
+		for (const structure of structures) {
+			const safeTypes: string[] = [STRUCTURE_STORAGE, STRUCTURE_TERMINAL, STRUCTURE_SPAWN];
+			// Destroy the structure if it is less important and not protected
+			if (!this.structureShouldBeHere(structure.structureType, pos)) {
+				if (safeTypes.includes(structure.structureType)) {
+					// TODO
+					return `${structure.structureType} is safe type!`;
+				} else {
+					return 'destroy() disabled'; // structure.destroy();
+				}
+			}
+		}
+		log.error(`destroyStructurePreventingBuildingAtPos shouldn't be called here`);
+		return `destroyStructurePreventingBuildingAtPos shouldn't be called here`;
 	}
 
 	/**
@@ -806,7 +829,8 @@ export class RoomPlanner {
 		if (!upgradeLink) return this.colony.controller.pos;
 		// MiningSites by decreasing distance
 		const origin = (this.colony.storage || this.colony.terminal || _.first(this.colony.spawns) || this.colony).pos;
-		const farthestSources = _.sortBy(this.colony.room.sources, source => -1 * Pathing.distance(origin, source.pos));
+		const farthestSources = _.sortBy(this.colony.room.sources,
+										 source => -1 * (Pathing.distance(origin, source.pos) || Infinity));
 		for (const source of farthestSources) {
 			const sourceLink = source.pos.findClosestByLimitedRange(linksEtAl, 2);
 			if (!sourceLink) return source.pos;
@@ -844,18 +868,25 @@ export class RoomPlanner {
 	}
 
 	init(): void {
-		if (this.active && getAutonomyLevel() == Autonomy.Automatic) {
+		if (this.active) {
+			Overmind.overseer.notifier.alert(`Room planner active!`, this.colony.room.name);
+		}
+		if (this.memory.misplacedStructures) {
+			Overmind.overseer.notifier.alert(`Misplaced structures!`, this.colony.room.name);
+		}
+		if (this.active && getAutonomyLevel() == Autonomy.Automatic && !this.memory.bunkerData) {
 			let bunkerAnchor: RoomPosition;
 			if (this.colony.spawns.length > 0) { // in case of very first spawn
 				const lowerRightSpawn = maxBy(this.colony.spawns, s => 50 * s.pos.y + s.pos.x)!;
 				const spawnPos = lowerRightSpawn.pos;
 				bunkerAnchor = new RoomPosition(spawnPos.x - 4, spawnPos.y, spawnPos.roomName);
 			} else {
-				const expansionData = this.colony.room.memory[_RM.EXPANSION_DATA];
+				const expansionData = RoomIntel.getExpansionData(this.colony.room.name);
 				if (expansionData) {
-					bunkerAnchor = derefCoords(expansionData.bunkerAnchor, this.colony.room.name);
+					bunkerAnchor = expansionData.bunkerAnchor;
 				} else {
-					log.error(`Cannot determine anchor! No spawns or expansionData.bunkerAnchor!`);
+					log.error(`Cannot determine anchor! No spawns or expansionData.bunkerAnchor for ` +
+							  `${this.colony.print}!`);
 					return;
 				}
 			}
@@ -865,13 +896,16 @@ export class RoomPlanner {
 		this.roadPlanner.init();
 	}
 
+	requestRecheck(ticksFromNow = 1): void {
+		this.memory.recheckStructuresAt = Game.time + ticksFromNow;
+	}
+
 	shouldRecheck(offset = 0): boolean {
 		if (Game.time == (this.memory.recheckStructuresAt || Infinity) + offset) {
 			return true;
-		} else if (this.colony.level == 8) {
-			return Game.time % (2 * RoomPlanner.settings.siteCheckFrequency) == 2 * this.colony.id + offset;
 		} else {
-			return Game.time % RoomPlanner.settings.siteCheckFrequency == 2 * this.colony.id + offset;
+			const checkFreq = RoomPlanner.settings.siteCheckFrequency * this.colony.level;
+			return Game.time % checkFreq == (2 * this.colony.id + offset) % checkFreq;
 		}
 	}
 
@@ -907,12 +941,9 @@ export class RoomPlanner {
 	visuals(): void {
 		// Draw the map
 		if (getAutonomyLevel() < Autonomy.Automatic) {
-			const expansionData = this.colony.room.memory[_RM.EXPANSION_DATA];
+			const expansionData = RoomIntel.getExpansionData(this.colony.room.name);
 			if (expansionData) {
-				const bunkerPos = derefCoords(expansionData.bunkerAnchor, this.colony.room.name);
-				if (bunkerPos) {
-					Visualizer.drawLayout(bunkerLayout, bunkerPos, {opacity: 0.2});
-				}
+				Visualizer.drawLayout(bunkerLayout, expansionData.bunkerAnchor, {opacity: 0.2});
 			}
 		}
 		Visualizer.drawStructureMap(this.map);

@@ -1,6 +1,5 @@
 import {CreepSetup} from '../../creepSetups/CreepSetup';
 import {Roles, Setups} from '../../creepSetups/setups';
-import {TERMINAL_STATE_REBUILD} from '../../directives/terminalState/terminalState_rebuild';
 import {Hatchery} from '../../hiveClusters/hatchery';
 import {OverlordPriority} from '../../priorities/priorities_overlords';
 import {profile} from '../../profiler/decorator';
@@ -29,10 +28,8 @@ export class QueenOverlord extends Overlord {
 	constructor(hatchery: Hatchery, priority = OverlordPriority.core.queen) {
 		super(hatchery, 'supply', priority);
 		this.hatchery = hatchery;
-		this.queenSetup = this.colony.storage ? Setups.queens.default : Setups.queens.early;
-		if (this.colony.terminalState == TERMINAL_STATE_REBUILD) {
-			this.queenSetup = Setups.queens.early;
-		}
+		this.queenSetup = this.colony.storage && !this.colony.state.isRebuilding ? Setups.queens.default
+																				 : Setups.queens.early;
 		this.queens = this.zerg(Roles.queen);
 		this.settings = {
 			refillTowersBelow: 500,
@@ -58,35 +55,42 @@ export class QueenOverlord extends Overlord {
 	private rechargeActions(queen: Zerg): void {
 		if (this.hatchery.link && !this.hatchery.link.isEmpty) {
 			queen.task = Tasks.withdraw(this.hatchery.link);
-		} else if (this.hatchery.battery && this.hatchery.battery.energy > 0) {
-			queen.task = Tasks.withdraw(this.hatchery.battery);
+		} else if (this.hatchery.batteries.length > 0) {
+			const target = queen.pos.findClosestByRange(_.filter(this.hatchery.batteries, b => b.energy > 0));
+			if (target) {
+				queen.task = Tasks.withdraw(target);
+			} else {
+				queen.task = Tasks.recharge();
+			}
 		} else {
 			queen.task = Tasks.recharge();
 		}
 	}
 
 	private idleActions(queen: Zerg): void {
+		// will only have one battery when this overlord is called
+		const battery = queen.pos.findClosestByRange(this.hatchery.batteries);
 		if (this.hatchery.link) {
 			// Can energy be moved from the link to the battery?
-			if (this.hatchery.battery && !this.hatchery.battery.isFull && !this.hatchery.link.isEmpty) {
+			if (battery && !battery.isFull && !this.hatchery.link.isEmpty) {
 				// Move energy to battery as needed
 				if (queen.carry.energy < queen.carryCapacity) {
 					queen.task = Tasks.withdraw(this.hatchery.link);
 				} else {
-					queen.task = Tasks.transfer(this.hatchery.battery);
+					queen.task = Tasks.transfer(battery);
 				}
 			} else {
 				if (queen.carry.energy < queen.carryCapacity) { // make sure you're recharged
 					if (!this.hatchery.link.isEmpty) {
 						queen.task = Tasks.withdraw(this.hatchery.link);
-					} else if (this.hatchery.battery && !this.hatchery.battery.isEmpty) {
-						queen.task = Tasks.withdraw(this.hatchery.battery);
+					} else if (battery && !battery.isEmpty) {
+						queen.task = Tasks.withdraw(battery);
 					}
 				}
 			}
 		} else {
-			if (this.hatchery.battery && queen.carry.energy < queen.carryCapacity) {
-				queen.task = Tasks.withdraw(this.hatchery.battery);
+			if (battery && queen.carry.energy < queen.carryCapacity) {
+				queen.task = Tasks.withdraw(battery);
 			}
 		}
 	}

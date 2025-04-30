@@ -3,10 +3,11 @@ import {printRoomName} from '../utilities/utils';
 import {Visualizer} from '../visuals/Visualizer';
 
 export enum NotifierPriority {
-	Critical = 0,
-	High     = 1,
-	Normal   = 2,
-	Low      = 3,
+	SystemUpdate = -1,
+	Critical     = 0,
+	High         = 1,
+	Normal       = 2,
+	Low          = 3,
 }
 
 // An alert is a one-tick notification which must be refreshed every tick, e.g. while a directive is up
@@ -52,9 +53,8 @@ export class Notifier {
 	}
 
 	// TODO: finish
-	notify(message: string, roomName: string, duration = 100, email = false) {
+	email(message: string, roomName: string, duration = 100, email = false) {
 		log.alert(printRoomName(roomName) + ': ' + message);
-
 	}
 
 	// init() {

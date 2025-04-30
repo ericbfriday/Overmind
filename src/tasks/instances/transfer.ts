@@ -1,22 +1,16 @@
-import {EnergyStructure, isEnergyStructure, isStoreStructure, StoreStructure} from '../../declarations/typeGuards';
 import {profile} from '../../profiler/decorator';
 import {Task} from '../Task';
 
 
 export type transferTargetType =
-	EnergyStructure
-	| StoreStructure
-	| StructureLab
-	| StructureNuker
-	| StructurePowerSpawn
+	TransferrableStoreStructure
 	| Creep;
 
 export const transferTaskName = 'transfer';
 
 @profile
-export class TaskTransfer extends Task {
+export class TaskTransfer extends Task<transferTargetType> {
 
-	target: transferTargetType;
 	data: {
 		resourceType: ResourceConstant
 		amount: number | undefined
@@ -27,6 +21,7 @@ export class TaskTransfer extends Task {
 		super(transferTaskName, target, options);
 		// Settings
 		this.settings.oneShot = true;
+		this.settings.blind = true;
 		this.data.resourceType = resourceType;
 		this.data.amount = amount;
 	}
@@ -39,29 +34,36 @@ export class TaskTransfer extends Task {
 
 	isValidTarget() {
 		const amount = this.data.amount || 1;
-		const target = this.target;
-		if (target instanceof Creep) {
-			return _.sum(target.carry) <= target.carryCapacity - amount;
-		} else if (isStoreStructure(target)) {
-			return _.sum(target.store) <= target.storeCapacity - amount;
-		} else if (isEnergyStructure(target) && this.data.resourceType == RESOURCE_ENERGY) {
-			return target.energy <= target.energyCapacity - amount;
-		} else {
-			if (target instanceof StructureLab) {
-				return (target.mineralType == this.data.resourceType || !target.mineralType) &&
-					   target.mineralAmount <= target.mineralCapacity - amount;
-			} else if (target instanceof StructureNuker) {
-				return this.data.resourceType == RESOURCE_GHODIUM &&
-					   target.ghodium <= target.ghodiumCapacity - amount;
-			} else if (target instanceof StructurePowerSpawn) {
-				return this.data.resourceType == RESOURCE_POWER &&
-					   target.power <= target.powerCapacity - amount;
-			}
-		}
-		return false;
+		// TODO: if you don't have vision of the creep (transferring to other creep?)
+		return !!this.target && this.target.store.getFreeCapacity(this.data.resourceType) >= amount;
+
+
+		// LEGACY:
+
+		// const target = this.target;
+		// if (target instanceof Creep) {
+		// 	return _.sum(target.carry) <= target.carryCapacity - amount;
+		// } else if (isStoreStructure(target)) {
+		// 	return _.sum(target.store) <= target.storeCapacity - amount;
+		// } else if (isEnergyStructure(target) && this.data.resourceType == RESOURCE_ENERGY) {
+		// 	return target.energy <= target.energyCapacity - amount;
+		// } else {
+		// 	if (target instanceof StructureLab) {
+		// 		return (target.mineralType == this.data.resourceType || !target.mineralType) &&
+		// 			   target.mineralAmount <= target.mineralCapacity - amount;
+		// 	} else if (target instanceof StructureNuker) {
+		// 		return this.data.resourceType == RESOURCE_GHODIUM &&
+		// 			   target.ghodium <= target.ghodiumCapacity - amount;
+		// 	} else if (target instanceof StructurePowerSpawn) {
+		// 		return this.data.resourceType == RESOURCE_POWER &&
+		// 			   target.power <= target.powerCapacity - amount;
+		// 	}
+		// }
+		// return false;
 	}
 
 	work() {
+		if (!this.target) return ERR_INVALID_TARGET;
 		return this.creep.transfer(this.target, this.data.resourceType, this.data.amount);
 	}
 }

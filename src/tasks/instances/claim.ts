@@ -5,8 +5,7 @@ export type claimTargetType = StructureController;
 export const claimTaskName = 'claim';
 
 @profile
-export class TaskClaim extends Task {
-	target: claimTargetType;
+export class TaskClaim extends Task<claimTargetType> {
 
 	constructor(target: claimTargetType, options = {} as TaskOptions) {
 		super(claimTaskName, target, options);
@@ -22,10 +21,9 @@ export class TaskClaim extends Task {
 	}
 
 	work() {
-		const result = this.creep.claimController(this.target);
-		if (result == OK) {
-			Overmind.shouldBuild = true; // rebuild the overmind object on the next tick to account for new room
+		if (!this.target) {
+			return ERR_INVALID_TARGET;
 		}
-		return result;
+		return this.creep.claimController(this.target);
 	}
 }
